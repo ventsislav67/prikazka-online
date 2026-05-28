@@ -6,6 +6,14 @@ let currentGenre = 'Приключенска';
 let storyHistory = [];
 let isReading = false;
 let currentUtterance = null;
+let isGenerating = false;
+let wordQueue = [];
+let queueRemainder = "";
+let queueAnimatorRunning = false;
+let queueRunId = 0;
+
+const API_KEY_MODE_STORAGE = "openrouter-key-mode";
+const API_KEY_VALUE_STORAGE = "openrouter-api-key";
 
 const genreData = {
   'Приключенска': {
@@ -83,6 +91,7 @@ const historyEl = document.getElementById("history");
 
 document.addEventListener('DOMContentLoaded', () => {
   initGenreButtons();
+  initModals();
   initMouseParticles();
   initSparkles();
   updateAnimals();
@@ -243,10 +252,221 @@ function parseLength(value) {
   return match ? Number(match[0]) : 3;
 }
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function escapeHtml(value) {
+  const div = document.createElement("div");
+  div.textContent = value || "";
+  return div.innerHTML;
+}
+
+function getApiKeyMode() {
+  return localStorage.getItem(API_KEY_MODE_STORAGE) === "personal" ? "personal" : "basic";
+}
+
+function getPersonalApiKey() {
+  return (localStorage.getItem(API_KEY_VALUE_STORAGE) || "").trim();
+}
+
+function buildRequestHeaders() {
+  const headers = { "Content-Type": "application/json" };
+
+  if (getApiKeyMode() === "personal") {
+    const key = getPersonalApiKey();
+    if (key) {
+      headers["x-openrouter-key"] = key;
+    }
+  }
+
+  return headers;
+}
+
+function initModals() {
+  const helpBtn = document.getElementById("help-btn");
+  const keyBtn = document.getElementById("key-btn");
+  const overlay = document.getElementById("modal-overlay");
+  const closeBtn = document.getElementById("modal-close");
+
+  if (helpBtn) {
+    helpBtn.addEventListener("click", openHelpModal);
+  }
+
+  if (keyBtn) {
+    keyBtn.addEventListener("click", openApiKeyModal);
+  }
+
+  if (closeBtn) {
+    closeBtn.addEventListener("click", closeModal);
+  }
+
+  if (overlay) {
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) {
+        closeModal();
+      }
+    });
+  }
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && overlay && overlay.style.display !== "none") {
+      closeModal();
+    }
+  });
+}
+
+function openModal(title, bodyHtml, afterRender) {
+  const overlay = document.getElementById("modal-overlay");
+  const modalTitle = document.getElementById("modal-title");
+  const modalBody = document.getElementById("modal-body");
+  const closeBtn = document.getElementById("modal-close");
+
+  if (!overlay || !modalTitle || !modalBody) return;
+
+  modalTitle.textContent = title;
+  modalBody.innerHTML = bodyHtml;
+  overlay.style.display = "grid";
+  overlay.classList.add("is-open");
+
+  if (typeof afterRender === "function") {
+    afterRender();
+  }
+
+  if (closeBtn) {
+    closeBtn.focus();
+  }
+}
+
+function closeModal() {
+  const overlay = document.getElementById("modal-overlay");
+  const modalBody = document.getElementById("modal-body");
+
+  if (!overlay) return;
+
+  overlay.style.display = "none";
+  overlay.classList.remove("is-open");
+
+  if (modalBody) {
+    modalBody.innerHTML = "";
+  }
+}
+
+function openHelpModal() {
+  openModal(
+    "Как работи",
+    `
+      <div class="modal-panel">
+        <ol class="modal-list">
+          <li>Избери жанр, възраст, език и дължина на приказката.</li>
+          <li>Напиши герой и основен проблем, а по желание добави поука.</li>
+          <li>Натисни „Генерирай Приказка“ и изчакай магията да започне.</li>
+          <li>Приказката се появява дума по дума, докато AI я създава.</li>
+          <li>След края можеш да я прочетеш на глас, да я спреш или да я подобриш още.</li>
+        </ol>
+        <p class="modal-note">Последните приказки се пазят в историята на това устройство.</p>
+      </div>
+    `
+  );
+}
+
+function openApiKeyModal() {
+  const mode = getApiKeyMode();
+  const savedKey = getPersonalApiKey();
+
+  openModal(
+    "API ключ",
+    `
+      <div class="modal-panel key-modal-panel">
+        <div class="key-switch-row" role="group" aria-label="Избор на API ключ">
+          <span id="basic-key-label" class="key-mode-label">Basic</span>
+          <label class="switch" for="api-key-mode-toggle">
+            <input id="api-key-mode-toggle" type="checkbox" ${mode === "personal" ? "checked" : ""}>
+            <span class="slider"></span>
+          </label>
+          <span id="personal-key-label" class="key-mode-label">Мой личен ключ</span>
+        </div>
+
+        <div id="personal-key-field" class="personal-key-field">
+          <label for="openrouter-key-input">OpenRouter API key</label>
+          <input id="openrouter-key-input" class="magic-input modal-key-input" type="password" autocomplete="off" value="${mode === "personal" ? escapeHtml(savedKey) : ""}" placeholder="sk-or-...">
+        </div>
+
+        <div class="modal-actions">
+          <button id="save-api-key-btn" class="modal-save-btn" type="button">Запази</button>
+        </div>
+        <p id="api-key-status" class="modal-save-status" aria-live="polite"></p>
+      </div>
+    `,
+    initApiKeyModalControls
+  );
+}
+
+function initApiKeyModalControls() {
+  const toggle = document.getElementById("api-key-mode-toggle");
+  const input = document.getElementById("openrouter-key-input");
+  const saveBtn = document.getElementById("save-api-key-btn");
+  const status = document.getElementById("api-key-status");
+  const field = document.getElementById("personal-key-field");
+  const basicLabel = document.getElementById("basic-key-label");
+  const personalLabel = document.getElementById("personal-key-label");
+
+  const syncUi = () => {
+    const isPersonal = !!toggle?.checked;
+
+    if (field) {
+      field.hidden = !isPersonal;
+    }
+    if (input) {
+      input.value = isPersonal ? (input.value || getPersonalApiKey()) : "";
+    }
+    if (basicLabel) {
+      basicLabel.classList.toggle("active", !isPersonal);
+    }
+    if (personalLabel) {
+      personalLabel.classList.toggle("active", isPersonal);
+    }
+  };
+
+  if (toggle) {
+    toggle.addEventListener("change", () => {
+      syncUi();
+      if (status) status.textContent = "";
+      if (toggle.checked && input) {
+        input.focus();
+      }
+    });
+  }
+
+  if (saveBtn) {
+    saveBtn.addEventListener("click", () => {
+      const isPersonal = !!toggle?.checked;
+      const key = (input?.value || "").trim();
+
+      if (isPersonal && !key) {
+        if (status) status.textContent = "Въведи OpenRouter ключ или избери Basic.";
+        return;
+      }
+
+      localStorage.setItem(API_KEY_MODE_STORAGE, isPersonal ? "personal" : "basic");
+
+      if (isPersonal) {
+        localStorage.setItem(API_KEY_VALUE_STORAGE, key);
+      }
+
+      if (status) {
+        status.textContent = "Запазено.";
+      }
+    });
+  }
+
+  syncUi();
+}
+
 function saveStory(title, story) {
   const stories = JSON.parse(localStorage.getItem("stories")) || [];
   stories.unshift({ id: Date.now(), title, story });
-  localStorage.setItem("stories", JSON.stringify(stories));
+  localStorage.setItem("stories", JSON.stringify(stories.slice(0, 3)));
   renderHistory();
 }
 
@@ -311,143 +531,240 @@ async function typeText(element, text) {
   }
 }
 
+function resetWordQueue() {
+  wordQueue = [];
+  queueRemainder = "";
+  queueRunId += 1;
+  queueAnimatorRunning = false;
+}
+
+function enqueueStreamText(text, flush = false) {
+  if (!text && !flush) return;
+
+  queueRemainder += text;
+  const tokens = queueRemainder.match(/\s+|\S+/g) || [];
+
+  if (!flush && tokens.length > 0) {
+    const lastToken = tokens[tokens.length - 1];
+    if (!/\s/.test(lastToken)) {
+      queueRemainder = lastToken;
+      tokens.pop();
+    } else {
+      queueRemainder = "";
+    }
+  } else {
+    queueRemainder = "";
+  }
+
+  if (tokens.length > 0) {
+    wordQueue.push(...tokens);
+    startWordAnimator();
+  }
+}
+
+function getTokenDelay(token) {
+  if (/^\s+$/.test(token)) {
+    return token.includes("\n") ? 10 : 7;
+  }
+
+  return 42;
+}
+
+async function startWordAnimator() {
+  if (queueAnimatorRunning) return;
+
+  queueAnimatorRunning = true;
+  const runId = queueRunId;
+
+  while (queueRunId === runId && wordQueue.length > 0) {
+    const token = wordQueue.shift();
+    resultEl.textContent += token;
+    await sleep(getTokenDelay(token));
+  }
+
+  if (queueRunId === runId) {
+    queueAnimatorRunning = false;
+  }
+}
+
+async function waitForWordQueueIdle() {
+  while (queueAnimatorRunning || wordQueue.length > 0 || queueRemainder) {
+    if (!queueAnimatorRunning && wordQueue.length > 0) {
+      startWordAnimator();
+    }
+    await sleep(20);
+  }
+}
+
+function showGenerationStatus() {
+  const status = document.getElementById("generation-status");
+  if (!status) return;
+
+  status.hidden = false;
+  status.classList.remove("has-text");
+
+  const message = status.querySelector(".generation-message");
+  if (message) {
+    message.textContent = "✨ Магията работи...";
+  }
+}
+
+function markGenerationTextStarted() {
+  const status = document.getElementById("generation-status");
+  if (!status) return;
+
+  status.classList.add("has-text");
+
+  const message = status.querySelector(".generation-message");
+  if (message) {
+    message.textContent = "✨ Приказката се пише...";
+  }
+}
+
+function hideGenerationStatus() {
+  const status = document.getElementById("generation-status");
+  if (!status) return;
+
+  status.hidden = true;
+  status.classList.remove("has-text");
+}
+
+function setGenerateButtonLoading(isLoading) {
+  const generateBtn = document.getElementById('generate-btn');
+  if (!generateBtn) return;
+
+  generateBtn.disabled = isLoading;
+  generateBtn.classList.toggle('generating', isLoading);
+
+  const text = generateBtn.querySelector('.btn-text');
+  if (text) {
+    text.textContent = isLoading ? 'Магията работи...' : 'Генерирай Приказка';
+  }
+}
+
+function showStoryContainer() {
+  const storyContainer = document.getElementById('story-container');
+  if (storyContainer) {
+    storyContainer.style.display = 'block';
+  }
+}
+
 // ============================================
 
 // ГЕНЕРИРАНЕ НА ПРИКАЗКА (API)
 // ============================================
 
 async function generate() {
- const heroInputs = Array.from(document.querySelectorAll("#heroes-inline .hero-segment"));
-const hero = (heroInputs[0]?.value || "").trim();
+  if (isGenerating) return;
+
+  const heroInputs = Array.from(document.querySelectorAll("#heroes-inline .hero-segment"));
+  const heroes = heroInputs.map(input => input.value.trim()).filter(Boolean);
+  const hero = heroes[0] || "";
   const goal = document.getElementById("goal").value.trim();
   const age = document.getElementById("age").value;
   const language = document.getElementById("language").value;
-  const genre = currentGenre; // ✅ ТУК Е ПОПРАВКАТА
+  const genre = currentGenre;
   const lengthRaw = document.getElementById("length").value;
   const length = parseLength(lengthRaw);
+  const moral = (document.getElementById("moral")?.value || "").trim();
 
   if (!hero || !goal) {
+    showStoryContainer();
+    hideGenerationStatus();
     resultEl.textContent = "⚠️ Моля, попълни име на герой и проблем.";
     return;
   }
 
-resultEl.textContent = "⏳ Генерирам приказка...";
-try {
-    const res = await fetch("/api/generate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        hero,
-        goal,
-        age,
-        language,
-        genre,
-        length
-      })
-    });
-
-    const data = await res.json();
-
-    if (!res.ok || !data.story) {
-      resultEl.textContent = "❌ Грешка при генериране.";
-      return;
-    }
-
-    resultEl.textContent = '';
-    await typeText(resultEl, data.story);
-    saveStory(`Приказка за ${hero}`, data.story);
-
-  } catch (err) {
-    console.error(err);
-    resultEl.textContent = "❌ Грешка при връзка със сървъра.";
-  }
-
-  // Визуални ефекти
-  const generateBtn = document.getElementById('generate-btn');
   const improveBtn = document.getElementById('improve-btn');
-  const storyContainer = document.getElementById('story-container');
-  
-  if (generateBtn) {
-    generateBtn.classList.add('generating');
-    generateBtn.querySelector('.btn-text').textContent = 'Магията работи...';
+
+  isGenerating = true;
+  resetWordQueue();
+  setGenerateButtonLoading(true);
+  showStoryContainer();
+  showGenerationStatus();
+  resultEl.textContent = "";
+
+  if (improveBtn) {
+    improveBtn.style.display = 'none';
   }
-  
+
+  if (window.speechSynthesis && (window.speechSynthesis.speaking || window.speechSynthesis.pending)) {
+    stopReading();
+  }
+
   createMagicBurst();
-  
-  if (storyContainer) {
-    storyContainer.style.display = 'block';
-  }
-  
-  resultEl.textContent = "⏳ Генерирам приказка...";
 
   try {
-    const res = await fetch("/api/generate", {
+    const res = await fetch("/api/generate-stream", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: buildRequestHeaders(),
       body: JSON.stringify({
         hero,
+        heroes,
         goal,
         age,
         language,
         genre,
-        length
+        length,
+        moral
       })
     });
 
-    const data = await res.json();
-
-    if (!res.ok) {
-      console.error("SERVER ERROR:", data);
-
-      if (res.status === 422) {
-        resultEl.textContent =
-          "⚠️ " + (data.error || "Текстът не покри качествените изисквания.");
-        
-        if (generateBtn) {
-          generateBtn.classList.remove('generating');
-          generateBtn.querySelector('.btn-text').textContent = 'Генерирай Приказка';
-        }
-        return;
-      }
-
-      resultEl.textContent = "❌ Вътрешна сървърна грешка.";
-      
-      if (generateBtn) {
-        generateBtn.classList.remove('generating');
-        generateBtn.querySelector('.btn-text').textContent = 'Генерирай Приказка';
-      }
-      return;
+    if (!res.ok || !res.body) {
+      const errorText = await res.text().catch(() => "");
+      throw new Error(errorText || "Stream response error");
     }
 
-    if (!data.story) {
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let hasTextStarted = false;
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+
+      const chunk = decoder.decode(value, { stream: true });
+      if (!chunk) continue;
+
+      if (!hasTextStarted && chunk.trim()) {
+        hasTextStarted = true;
+        markGenerationTextStarted();
+      }
+
+      enqueueStreamText(chunk);
+    }
+
+    const tail = decoder.decode();
+    if (tail) {
+      if (!hasTextStarted && tail.trim()) {
+        hasTextStarted = true;
+        markGenerationTextStarted();
+      }
+      enqueueStreamText(tail);
+    }
+
+    enqueueStreamText("", true);
+    await waitForWordQueueIdle();
+
+    const finalStory = resultEl.textContent.trim();
+    if (!finalStory || finalStory.startsWith("[ERROR]") || finalStory === "SERVER_ERROR") {
       resultEl.textContent = "⚠️ Не успях да генерирам приказка.";
-      
-      if (generateBtn) {
-        generateBtn.classList.remove('generating');
-        generateBtn.querySelector('.btn-text').textContent = 'Генерирай Приказка';
-      }
       return;
     }
 
-    // Анимирано показване на текста
-    resultEl.textContent = '';
-    await typeText(resultEl, data.story);
-    
-    saveStory(`Приказка за ${hero}`, data.story);
-    
-    // Показване на бутон за подобряване
+    saveStory(`Приказка за ${hero}`, finalStory);
+
     if (improveBtn) {
       improveBtn.style.display = 'flex';
     }
-
   } catch (err) {
     console.error("FETCH ERROR:", err);
+    resetWordQueue();
     resultEl.textContent = "❌ Грешка при връзка със сървъра.";
   } finally {
-    if (generateBtn) {
-      generateBtn.classList.remove('generating');
-      generateBtn.querySelector('.btn-text').textContent = 'Генерирай Приказка';
-    }
+    isGenerating = false;
+    hideGenerationStatus();
+    setGenerateButtonLoading(false);
   }
 }
 
@@ -477,7 +794,7 @@ async function improve() {
   try {
     const res = await fetch("/api/improve", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: buildRequestHeaders(),
       body: JSON.stringify({ story: currentStory })
     });
 
