@@ -252,6 +252,65 @@ ${story}
     .trim();
 }
 
+function buildWriterPrompt({ hero, goal, age, language, genre, length, heroes, moral }) {
+  const safeHeroes = Array.isArray(heroes) && heroes.length ? heroes : [hero];
+  const extraHeroes = safeHeroes.length > 1 ? safeHeroes.slice(1).join(", ") : "няма";
+  const moralText = (moral || "").trim();
+  const isTeen = age === "12-16";
+  const outputLanguage = language === "en" ? "английски" : "български";
+
+  return `
+Пиши детска приказка на ${outputLanguage} език.
+
+Ти си професионален детски писател и разказвач с отлична езикова култура.
+Пишеш качествени детски приказки, които се четат плавно и звучат естествено.
+
+ОБЩИ ИЗИСКВАНИЯ:
+- Перфектен правопис, граматика и стил
+- Богат, жив, топъл и човешки разказ
+- Ясно начало, силно развитие и запомнящ се край
+- Поуката да бъде показана чрез действията на героя, без назидателност
+- Подходяща за деца на възраст ${age} години
+- Дължина: точно ${length} абзаца
+
+СТРУКТУРА:
+- Всеки абзац започва на нов ред
+- Между абзаците има празен ред
+- Не обединявай абзаци
+- Не добавяй заглавие, инструкции или коментари
+
+БЕЗОПАСНОСТ ЗА ДЕЦА:
+- Приказката трябва да е напълно подходяща за деца
+- Без насилие, омраза, отмъщение, самонараняване или опасно подражаемо поведение
+- Ако има магически, фантастичен или абсурден елемент, направи го ясно безобиден, символичен или очевидно нереалистичен
+
+СПЕЦИАЛНО ЗА 12-16:
+${isTeen ? `- Позволен е по-богат речник и по-дълбоки теми
+- Историята може да е по-плътна, но остава напълно безопасна` : `- Използвай нормален детски стил според възрастта, без да става бебешко.`}
+
+ГЕРОИ:
+Основен герой: ${hero}
+Допълнителни герои: ${extraHeroes}
+
+ОСНОВЕН ПРОБЛЕМ:
+${goal}
+
+ЖАНР: ${genre}
+
+ПОУКА:
+${moralText ? moralText : "Авторът избира поука според историята"}
+
+ЖАНРОВИ УКАЗАНИЯ:
+Ако жанрът е Приключенска, историята да има движение, изпитания и победа над трудностите.
+Ако жанрът е Фентъзи, използвай магия, необикновени светове и ясна вътрешна логика.
+Ако жанрът е Мистериозна, изгради загадка, улики и постепенно разкриване.
+Ако жанрът е Поучителна, фокусирай се върху вътрешното израстване чрез преживяване.
+Ако жанрът е Хумористична, използвай забавни ситуации и неочаквани, безопасни обрати.
+
+Преди финалния отговор поправи всички езикови неточности и върни САМО текста на приказката.
+`;
+}
+
 /* ================= GENERATE ================= */
 app.post("/api/generate", async (req, res) => {
   try {
@@ -429,52 +488,9 @@ ${moralText ? `- Последният абзац трябва ясно да за
   }
 });
 
-
-
-
-
-
-/* ================= GENERATE ================= */
-app.post("/api/generate", async (req, res) => {
-  try {
-    const { hero, goal, age, language, genre, length, heroes, moral } = req.body;
-
-    if (!hero || !goal || !length) {
-      return res.status(400).json({ error: "Липсват задължителни данни." });
-    }
-
-    const apiKeyOverride = req.headers["x-openrouter-key"] || null;
-
-    const writerPrompt = buildWriterPrompt({ hero, goal, age, language, genre, length, heroes, moral });
-
-    const rawStory = await callOpenRouter(
-      writerPrompt,
-      "You are a professional Bulgarian children's writer.",
-      apiKeyOverride
-    );
-
-    if (!rawStory) {
-      return res.status(500).json({ error: "AI не отговори." });
-    }
-
-    const edited = await editStory(rawStory, Number(length), apiKeyOverride);
-
-    if (!edited) {
-      return res.status(500).json({ error: "Редакторът не отговори." });
-    }
-
-    res.json({ story: edited });
-
-  } catch (err) {
-    console.error("SERVER ERROR:", err);
-    res.status(500).json({ error: "Вътрешна сървърна грешка." });
-  }
-});
-
 /* ================= GENERATE (STREAM LIVE) =================
-   - пращаме text/plain chunk-ове към клиента
-   - първо stream RAW
-   - накрая: редактор -> пращаме специален маркер
+   - пращаме text/plain delta chunk-ове към клиента веднага
+   - не буферираме целия текст преди отговор
 =========================================================== */
 app.post("/api/generate-stream", async (req, res) => {
   try {
@@ -484,46 +500,40 @@ app.post("/api/generate-stream", async (req, res) => {
       return res.status(400).json({ error: "Липсват задължителни данни." });
     }
 
-    const apiKeyOverride = req.headers["x-openrouter-key"] || null;
+    const apiKeyOverride = req.headers["x-openrouter-key"]?.trim() || null;
 
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
     res.setHeader("Cache-Control", "no-cache, no-transform");
     res.setHeader("Connection", "keep-alive");
+    res.flushHeaders?.();
 
     const writerPrompt = buildWriterPrompt({ hero, goal, age, language, genre, length, heroes, moral });
 
-    let raw = "";
+    let sentAnyText = false;
 
     const ok = await streamOpenRouter(
       writerPrompt,
       "You are a professional Bulgarian children's writer.",
       (delta) => {
-        raw += delta;
+        sentAnyText = true;
         res.write(delta);
       },
       apiKeyOverride
     );
 
-    if (!ok || !raw.trim()) {
+    if (!ok && !sentAnyText) {
       res.write("\n\n[ERROR] AI не отговори.\n");
-      return res.end();
     }
 
-    // след стрийма — редакция (не може да е live)
-    const edited = await editStory(raw, Number(length), apiKeyOverride);
-
-    if (!edited) {
-      res.write("\n\n[ERROR] Редакторът не отговори.\n");
-      return res.end();
-    }
-
-    // маркер за финал: клиентът ще го хване и ще замени с редактираното
-    res.write(`\n\n[FINAL_STORY]\n${edited}`);
     res.end();
 
   } catch (err) {
     console.error("STREAM ERROR:", err);
-    res.status(500).end("SERVER_ERROR");
+    if (!res.headersSent) {
+      res.status(500).end("SERVER_ERROR");
+    } else {
+      res.end("\n\n[ERROR] SERVER_ERROR\n");
+    }
   }
 });
 
@@ -535,7 +545,7 @@ app.post("/api/improve", async (req, res) => {
       return res.status(400).json({ error: "Липсва текст." });
     }
 
-    const apiKeyOverride = req.headers["x-openrouter-key"] || null;
+    const apiKeyOverride = req.headers["x-openrouter-key"]?.trim() || null;
 
     const improved = await editStory(story, 3, apiKeyOverride);
 
@@ -552,6 +562,7 @@ app.post("/api/improve", async (req, res) => {
 });
 
 /* ================= START ================= */
-app.listen(3000, () => {
-  console.log("✅ Server running on http://localhost:3000");
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`✅ Server running on http://localhost:${PORT}`);
 });
